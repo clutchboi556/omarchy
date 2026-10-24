@@ -79,29 +79,37 @@ normalize_scale() {
 # it over the rule that governs the monitor on every config load. One line per
 # monitor: scale, connector, saved-at time, description. A monitor with a
 # description is keyed by it, so its scale follows it between ports.
+#
+# Saved scales lose to monitors.lua edits made after them. The GDK edit in
+# set_scale is this command's own, not the user's, so it must not count as one:
+# edited_from is the file's time just before that edit, and every save that was
+# winning then is moved up to the edit's time so it keeps winning.
 save_scale() {
-  local scale="$1" name="$2" description="$3" monitor_lua="$4"
-  local saved_at config_changed_at
+  local scale="$1" name="$2" description="$3" monitor_lua="$4" edited_from="${5:-}"
+  local saved_at config_changed_at=""
 
   # Descriptions come from EDID; anything that could break a line is dropped.
   if [[ $description == *[[:cntrl:]]* ]]; then
     description=""
   fi
 
-  # Saved scales lose to monitors.lua edits made after them, so a save must
-  # never date from before the GDK edit just made to that file.
   saved_at=$(date +%s)
   if [[ -f $monitor_lua ]]; then
-    config_changed_at=$(stat -c %Y "$monitor_lua")
+    # -L: a monitors.lua symlinked into a dotfiles checkout is edited through
+    # its target, so the target's time is the one that matters.
+    config_changed_at=$(stat -L -c %Y "$monitor_lua")
     (( config_changed_at > saved_at )) && saved_at=$config_changed_at
   fi
+  [[ -n $config_changed_at ]] || edited_from=""
 
   mkdir -p "$SCALES_DIR" || return 0
   {
     if [[ -f $SCALES_FILE ]]; then
-      awk -F '\t' -v name="$name" -v description="$description" '
+      awk -F '\t' -v OFS='\t' -v name="$name" -v description="$description" \
+        -v from="$edited_from" -v to="$config_changed_at" '
         description != "" && $4 == description { next }
         description == "" && $4 == "" && $2 == name { next }
+        from != "" && $3 >= from + 0 && $3 < to + 0 { $3 = to }
         { print }
       ' "$SCALES_FILE"
     fi
@@ -134,17 +142,20 @@ set_scale() {
 
   audit_scale_change "$requested" "$active_monitor" "$current_scale" "$new_scale"
 
-  # Only touch monitors.lua when the GDK scale changes: editing it makes the
-  # saved scales below give way to it if the edit lands after them.
+  # Only touch monitors.lua when the GDK scale changes. save_scale is told the
+  # file's time from before the edit, so the edit doesn't outrank the saves.
+  local edited_from=""
   if [[ -f $monitor_lua ]] && grep -Eq "^local omarchy_gdk_scale = [0-9]+\$" "$monitor_lua" &&
     ! grep -Fxq "local omarchy_gdk_scale = $new_gdk_scale" "$monitor_lua"; then
-    sed -i -E "s|^local omarchy_gdk_scale = .*|local omarchy_gdk_scale = ${new_gdk_scale}|" "$monitor_lua"
+    edited_from=$(stat -L -c %Y "$monitor_lua")
+    sed -i --follow-symlinks -E "s|^local omarchy_gdk_scale = .*|local omarchy_gdk_scale = ${new_gdk_scale}|" "$monitor_lua"
   elif [[ -f $monitor_lua ]] && grep -Eq '^hl\.env\("GDK_SCALE", "[0-9]+"\)$' "$monitor_lua" &&
     ! grep -Fxq "hl.env(\"GDK_SCALE\", \"$new_gdk_scale\")" "$monitor_lua"; then
-    sed -i -E 's|^hl\.env\("GDK_SCALE", ".*"\)|hl.env("GDK_SCALE", "'"$new_gdk_scale"'")|' "$monitor_lua"
+    edited_from=$(stat -L -c %Y "$monitor_lua")
+    sed -i --follow-symlinks -E 's|^hl\.env\("GDK_SCALE", ".*"\)|hl.env("GDK_SCALE", "'"$new_gdk_scale"'")|' "$monitor_lua"
   fi
 
-  save_scale "$new_scale" "$active_monitor" "$description" "$monitor_lua"
+  save_scale "$new_scale" "$active_monitor" "$description" "$monitor_lua" "$edited_from"
 
   # Apply through the config so the scale lands on the rule that governs the
   # monitor: a live rule under another output key (say a desc: rule's monitor

@@ -101,7 +101,7 @@ configured_internal_monitor_value() {
 saved_internal_scale() {
   [[ -n $INTERNAL && -f $SAVED_SCALES ]] || return 0
   local config_changed_at=0
-  [[ -f $MONITOR_LUA ]] && config_changed_at=$(stat -c %Y "$MONITOR_LUA")
+  [[ -f $MONITOR_LUA ]] && config_changed_at=$(stat -L -c %Y "$MONITOR_LUA")
 
   awk -F '\t' -v name="$INTERNAL" -v since="$config_changed_at" '
     $2 == name && $3 >= since { scale = $1 }

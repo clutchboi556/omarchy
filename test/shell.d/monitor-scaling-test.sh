@@ -179,8 +179,78 @@ LUA
 touch -d @1000 "$monitor_lua"
 printf '1.25\tDP-2\t2000\tAcer KB272 A1\n1.6\teDP-1\t2000\t\n2\tDP-9\t500\tAcer KB272 B2\n' >"$saved_scales"
 applied=$(apply_saved_scales 2>&1)
-expected='mode=1920x1080@60 output=desc:Acer KB272 A1 position=0x0 scale=1.25
+# A1 shrinks to 1536x864 and B2 sits on its right, so A1 moves right (to x=384)
+# to keep touching it.
+expected='mode=1920x1080@60 output=desc:Acer KB272 A1 position=384x0 scale=1.25
 mode=preferred output=eDP-1 position=auto scale=1.6 transform=3'
 [[ $applied == "$expected" ]] ||
   fail "saved scales re-apply over the governing rule, skipping ones older than monitors.lua" "actual: $applied"
 pass "saved scales re-apply over the governing rule, skipping ones older than monitors.lua"
+
+# A 2x2 grid of fixed positions, as one rule per monitor. A scaled monitor stays
+# inside its own box against the side its neighbors are on, so the cursor can
+# still cross into them; the neighbors never move.
+apply_grid_scales() {
+  HOME="$home_dir" OMARCHY_PATH="$ROOT" lua <<'LUA'
+package.path = os.getenv("OMARCHY_PATH") .. "/?.lua;" .. package.path
+
+local applying = false
+hl = { monitor = function(rule) if applying then print(rule.output .. " " .. rule.position .. " " .. rule.scale) end end }
+
+package.loaded["default.hypr.monitor-scales"] = nil
+local scales = require("default.hypr.monitor-scales")
+scales.record()
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = "auto" })
+for _, m in ipairs({ { "TL", "0x0" }, { "TR", "1920x0" }, { "BL", "0x1080" }, { "BR", "1920x1080" } }) do
+  hl.monitor({ output = "desc:Grid " .. m[1], mode = "1920x1080@60", position = m[2], scale = 1 })
+end
+-- An unrelated monitor with Hyprland-chosen placement has no box to touch.
+hl.monitor({ output = "eDP-1", mode = "preferred", position = "auto", scale = 1 })
+applying = true
+scales.apply()
+applying = false
+LUA
+}
+
+touch -d @1000 "$monitor_lua"
+printf '1.25\tDP-1\t2000\tGrid TR\n1.25\tDP-2\t2000\tGrid TL\n2\tHDMI-A-1\t2000\tGrid BR\n1.25\teDP-1\t2000\t\n' >"$saved_scales"
+applied=$(apply_grid_scales 2>&1)
+expected='desc:Grid TR 1920x216 1.25
+desc:Grid TL 384x216 1.25
+desc:Grid BR 1920x1080 2
+eDP-1 auto 1.25'
+[[ $applied == "$expected" ]] ||
+  fail "a scaled monitor in a fixed layout keeps touching its neighbors" "actual: $applied"
+pass "a scaled monitor in a fixed layout keeps touching its neighbors"
+
+# The GDK edit this command makes to monitors.lua is not a user edit, so it
+# doesn't drop the other monitors' saves. A user edit after them still wins.
+write_monitor_config
+sed -i 's/^local omarchy_gdk_scale = .*/local omarchy_gdk_scale = 1/' "$monitor_lua"
+touch -d @1000 "$monitor_lua"
+printf '1.25\tHDMI-A-1\t2000\tOther Display\n1.6\tDP-3\t500\tStale Display\n' >"$saved_scales"
+OMARCHY_TEST_MONITOR_SCALE=1 run_scaling 2
+grep -Fx 'local omarchy_gdk_scale = 2' "$monitor_lua" >/dev/null || fail "monitor scaling 2x changes the GDK scale"
+config_at=$(stat -L -c %Y "$monitor_lua")
+other_at=$(awk -F '\t' '$2 == "HDMI-A-1" { print $3 }' "$saved_scales")
+stale_at=$(awk -F '\t' '$2 == "DP-3" { print $3 }' "$saved_scales")
+(( other_at >= config_at )) || fail "the command's own GDK edit keeps other monitors' saves" "saved $other_at, config $config_at"
+(( stale_at == 500 )) || fail "a save already older than monitors.lua stays older" "saved $stale_at"
+pass "the command's own GDK edit keeps other monitors' saves"
+
+# A monitors.lua symlinked into a dotfiles checkout: its target's time decides,
+# and the GDK edit goes through the link instead of replacing it.
+dotfiles="$test_tmp/dotfiles"
+mkdir -p "$dotfiles"
+write_monitor_config
+mv "$monitor_lua" "$dotfiles/monitors.lua"
+ln -s "$dotfiles/monitors.lua" "$monitor_lua"
+OMARCHY_TEST_MONITOR_SCALE=1 run_scaling 1.25
+[[ -L $monitor_lua ]] || fail "monitor scaling keeps a symlinked monitors.lua a symlink"
+grep -Fx 'local omarchy_gdk_scale = 1' "$dotfiles/monitors.lua" >/dev/null || fail "monitor scaling edits a symlinked monitors.lua's target"
+touch -h -d @1000 "$monitor_lua"
+touch -d @4000000000 "$dotfiles/monitors.lua"
+printf '1.25\tDP-2\t3999999999\tAcer KB272 A1\n' >"$saved_scales"
+applied=$(apply_saved_scales 2>&1)
+[[ -z $applied ]] || fail "an edit to a symlinked monitors.lua's target outranks an older save" "actual: $applied"
+pass "a symlinked monitors.lua is followed to its target"
